@@ -200,3 +200,17 @@ jobs:
         with:
           name: release-bundle
           path: combined/
+
+      - name: Setup JDK for building JAR
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Build universal fat JAR
+        run: |
+          mkdir -p jar-build
+          find combined/java/com -name "*.java" > sources.txt
+          javac --release 17 -d jar-build @sources.txt
+          cp -r combined/java/native jar-build/
+          jar --create --file combined/java/blendshaperouter.jar -C jar-build .
