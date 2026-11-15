@@ -111,7 +111,7 @@ utput = "dist/python/wheelhouse"
 
 [targets.csharp]
 output = "dist/csharp"
-enabled = false
+enabled = true
 
 [targets.csharp.nuget]
 
