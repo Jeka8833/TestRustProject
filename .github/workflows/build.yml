@@ -2,7 +2,7 @@ name: Build Cross-Platform Packages
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
   workflow_dispatch:
 
@@ -110,7 +110,7 @@ jobs:
             name: windows-x64
           - os: macos-latest
             name: macos-arm64
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: [ "3.11", "3.12", "3.13", "3.14" ]
 
     runs-on: ${{ matrix.os }}
 
@@ -153,7 +153,7 @@ jobs:
 
   # 3. Объединение всех артефактов в один архив
   bundle-release:
-    needs: [build-java-csharp, build-python]
+    needs: [ build-java-csharp, build-python ]
     runs-on: ubuntu-latest
 
     steps:
@@ -162,14 +162,25 @@ jobs:
         with:
           path: artifacts
 
+      - name: Setup JDK for building JAR
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup .NET SDK for universal NuGet & DLL
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x" # должен совпадать с target_framework в boltffi.toml
+
       - name: Merge artifacts
         run: |
           mkdir -p combined/java/native
           mkdir -p combined/csharp/runtimes
           mkdir -p combined/csharp/packages
           mkdir -p combined/python
-
-          # --- Java: общие .java исходники + нативные библиотеки всех ОС ---
+          
+          # --- Java: .java исходники + нативные библиотеки всех ОС ---
           first_java=$(find artifacts -maxdepth 1 -type d -name "java-dist-*" | head -n 1)
           cp -r "$first_java"/* combined/java/ 2>/dev/null || true
           rm -rf combined/java/native/*
@@ -178,8 +189,8 @@ jobs:
               cp -r "$dir/native/"* combined/java/native/
             fi
           done
-
-          # --- C#: исходники, .csproj, нативные runtimes/* всех ОС и .nupkg ---
+          
+          # --- C#: исходники, .csproj и нативные runtimes/* всех ОС ---
           first_cs=$(find artifacts -maxdepth 1 -type d -name "csharp-dist-*" | head -n 1)
           cp "$first_cs/BoltFFI.CSharp.csproj" combined/csharp/
           cp -r "$first_cs/src" combined/csharp/
@@ -187,30 +198,27 @@ jobs:
             if [ -d "$dir/runtimes" ]; then
               cp -r "$dir/runtimes/"* combined/csharp/runtimes/
             fi
-            if [ -d "$dir/packages" ]; then
-              cp "$dir/packages/"*.nupkg combined/csharp/packages/
-            fi
           done
-
+          
           # --- Python: все .whl для всех ОС и версий Python ---
           cp artifacts/python-wheel-*/*.whl combined/python/
 
+      - name: Build universal fat JAR (Java / Kotlin)
+        run: |
+          mkdir -p jar-build
+          find combined/java -name "*.java" > sources.txt
+          javac --release 17 -d jar-build @sources.txt
+          cp -r combined/java/native jar-build/
+          jar --create --file combined/java/blendshaperouter.jar -C jar-build .
+
+      - name: Build universal NuGet (.nupkg) and C# DLL
+        run: |
+          dotnet pack combined/csharp/BoltFFI.CSharp.csproj -c Release -o combined/csharp/packages
+          dotnet build combined/csharp/BoltFFI.CSharp.csproj -c Release -o combined/csharp/bin
+
+      # Важно: загрузка артефакта строго в самом конце!
       - name: Upload combined release bundle
         uses: actions/upload-artifact@v4
         with:
           name: release-bundle
           path: combined/
-
-      - name: Setup JDK for building JAR
-        uses: actions/setup-java@v4
-        with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: Build universal fat JAR
-        run: |
-          mkdir -p jar-build
-          find combined/java/com -name "*.java" > sources.txt
-          javac --release 17 -d jar-build @sources.txt
-          cp -r combined/java/native jar-build/
-          jar --create --file combined/java/blendshaperouter.jar -C jar-build .
