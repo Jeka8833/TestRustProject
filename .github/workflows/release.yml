@@ -15,10 +15,10 @@ env:
   CARGO_TERM_COLOR: always
   # Версия boltffi_cli должна совпадать с версией крейта boltffi в Cargo.toml
   BOLTFFI_CLI_VERSION: "0.32.1"
-  # Координаты Maven-пакета для Java
+  # Координаты Maven-пакета для Java (будут автоматически приведены к нижнему регистру для GitHub Packages)
   JAVA_GROUP_ID: "io.github.${{ github.repository_owner }}"
   JAVA_ARTIFACT_ID: "${{ github.event.repository.name }}"
-  # Название C# NuGet-пакета и Python-модуля (можно переопределить или брать из boltffi.toml)
+  # Название C# NuGet-пакета и Python-модуля
   CSHARP_PACKAGE_ID: "MyOrg.MyLib"
   PYTHON_MODULE_NAME: "mylib"
 
@@ -29,11 +29,14 @@ jobs:
   resolve-version:
     name: Resolve Git Tag Version
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -66,15 +69,25 @@ jobs:
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
+      - name: Cancel workflow on failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
+
   # ============================================================================
-  # 1. Java 8: сборка JNI-библиотек под 5 платформ и публикация единого JAR
+  # 1. Java 8: сборка JNI-библиотек под 5 платформ
   # ============================================================================
   build-java:
     name: Build Java Native (${{ matrix.java_target }})
     needs: [resolve-version]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: write
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - java_target: darwin-arm64
@@ -88,7 +101,7 @@ jobs:
           - java_target: windows-x86_64
             os: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.resolve-version.outputs.tag }}
 
@@ -108,7 +121,7 @@ jobs:
         with:
           prefix-key: v1-java-${{ matrix.java_target }}
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -119,7 +132,7 @@ jobs:
 
       - name: Cache boltffi_cli
         id: cache-boltffi
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/boltffi*
           key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
@@ -142,7 +155,7 @@ jobs:
           boltffi --overlay boltffi.ci-java.toml pack java --release
 
       - name: Upload native library (${{ matrix.java_target }})
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: java-native-${{ matrix.java_target }}
           path: dist/java/native/${{ matrix.java_target }}/*
@@ -150,100 +163,31 @@ jobs:
 
       - name: Upload generated Java 8 sources
         if: matrix.java_target == 'linux-x86_64'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: java-sources
           path: dist/java/**/*.java
           if-no-files-found: error
 
-  publish-java:
-    name: Package & Publish Java 8 (GitHub Packages)
-    needs: [resolve-version, build-java]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.resolve-version.outputs.tag }}
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-          server-id: github
-          server-username: GITHUB_ACTOR
-          server-password: GITHUB_TOKEN
-
-      - name: Download Java sources
-        uses: actions/download-artifact@v4
-        with:
-          name: java-sources
-          path: java-pkg/src/main/java
-
-      - name: Download all 5 native JNI libraries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: java-native-*
-          path: java-native-staging
-
-      - name: Stage native resources into Maven layout
-        run: |
-          set -euo pipefail
-          mkdir -p java-pkg/src/main/resources/native
-          for target in darwin-arm64 darwin-x86_64 linux-x86_64 linux-aarch64 windows-x86_64; do
-            src="java-native-staging/java-native-${target}"
-            if [ ! -d "$src" ] || [ -z "$(ls -A "$src")" ]; then
-              echo "::error::Отсутствует нативная библиотека для ${target}"
-              exit 1
-            fi
-            mkdir -p "java-pkg/src/main/resources/native/${target}"
-            cp "$src"/* "java-pkg/src/main/resources/native/${target}/"
-          done
-
-      - name: Generate pom.xml for Java 8 fat JAR
-        run: |
-          cat <<EOF > java-pkg/pom.xml
-          <project xmlns="http://maven.apache.org/POM/4.0.0"
-                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-            <modelVersion>4.0.0</modelVersion>
-            <groupId>${{ env.JAVA_GROUP_ID }}</groupId>
-            <artifactId>${{ env.JAVA_ARTIFACT_ID }}</artifactId>
-            <version>${{ needs.resolve-version.outputs.version }}</version>
-            <packaging>jar</packaging>
-
-            <properties>
-              <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-              <maven.compiler.release>8</maven.compiler.release>
-            </properties>
-
-            <distributionManagement>
-              <repository>
-                <id>github</id>
-                <name>GitHub Packages</name>
-                <url>https://maven.pkg.github.com/${{ github.repository }}</url>
-              </repository>
-            </distributionManagement>
-          </project>
-          EOF
-
-      - name: Build and publish Maven JAR to GitHub Packages
+      - name: Cancel workflow on failure
+        if: failure()
+        shell: bash
         env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: mvn -B -f java-pkg/pom.xml deploy
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
 
   # ============================================================================
-  # 2. C# .NET 10: сборка cdylib для 6 RID и публикация единого NuGet-пакета
+  # 2. C# .NET 10: сборка cdylib для 6 RID
   # ============================================================================
   build-csharp:
     name: Build C# Native (${{ matrix.rid }})
     needs: [resolve-version]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: write
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - rid: osx-arm64
@@ -265,7 +209,7 @@ jobs:
             os: windows-11-arm
             rust_target: aarch64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.resolve-version.outputs.tag }}
 
@@ -287,11 +231,12 @@ jobs:
         with:
           prefix-key: v1-csharp-${{ matrix.rid }}
 
+      # Без --locked, т.к. версия корневого Cargo.toml только что обновлена из Git-тега
       - name: Build Rust cdylib for ${{ matrix.rust_target }}
-        run: cargo build --release --locked --target ${{ matrix.rust_target }}
+        run: cargo build --release --target ${{ matrix.rust_target }}
 
       - name: Upload native cdylib (${{ matrix.rid }})
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: csharp-cdylib-${{ matrix.rust_target }}
           path: |
@@ -300,85 +245,12 @@ jobs:
             target/${{ matrix.rust_target }}/release/*.dll
           if-no-files-found: error
 
-  publish-csharp:
-    name: Pack & Publish C# .NET 10 (GitHub Packages)
-    needs: [resolve-version, build-csharp]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.resolve-version.outputs.tag }}
-
-      - name: Set Cargo.toml version from Git tag
+      - name: Cancel workflow on failure
+        if: failure()
+        shell: bash
         env:
-          PKG_VERSION: ${{ needs.resolve-version.outputs.version }}
-        run: |
-          awk -v ver="$PKG_VERSION" '
-            !done && /^version[[:space:]]*=/ { sub(/"[^"]*"/, "\"" ver "\""); done=1 }
-            { print }
-          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-
-      - name: Cache boltffi_cli
-        id: cache-boltffi
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/boltffi*
-          key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
-
-      - name: Install boltffi_cli
-        if: steps.cache-boltffi.outputs.cache-hit != 'true'
-        run: cargo install boltffi_cli --version "${{ env.BOLTFFI_CLI_VERSION }}" --locked
-
-      - name: Download all 6 native cdylib artifacts into target/
-        uses: actions/download-artifact@v4
-        with:
-          pattern: csharp-cdylib-*
-          path: csharp-staging
-
-      - name: Place prebuilt libraries in target/<triple>/release/
-        run: |
-          set -euo pipefail
-          for dir in csharp-staging/csharp-cdylib-*; do
-            triple="${dir#csharp-staging/csharp-cdylib-}"
-            mkdir -p "target/${triple}/release"
-            cp "$dir"/* "target/${triple}/release/"
-          done
-
-      - name: Generate C# bindings and multi-RID NuGet package (.NET 10)
-        run: |
-          cat <<EOF > boltffi.ci-csharp.toml
-          [targets.csharp]
-          enabled = true
-          output = "dist/csharp"
-          package_id = "${{ env.CSHARP_PACKAGE_ID }}"
-          target_framework = "net10.0"
-          runtime_identifiers = ["osx-arm64", "osx-x64", "linux-x64", "linux-arm64", "win-x64", "win-arm64"]
-          EOF
-          boltffi --overlay boltffi.ci-csharp.toml pack csharp --release --no-build
-
-          # Перепаковка через dotnet pack с RepositoryUrl для корректной привязки к GitHub Packages
-          rm -f dist/csharp/packages/*.nupkg
-          dotnet pack dist/csharp/BoltFFI.CSharp.csproj \
-            -c Release \
-            -p:PackageVersion="${{ needs.resolve-version.outputs.version }}" \
-            -p:RepositoryUrl="https://github.com/${{ github.repository }}" \
-            -o dist/csharp/packages
-
-      - name: Push NuGet package to GitHub Packages
-        run: |
-          dotnet nuget push "dist/csharp/packages/*.nupkg" \
-            --api-key "${{ secrets.GITHUB_TOKEN }}" \
-            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
-            --skip-duplicate
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
 
   # ============================================================================
   # 3. Python 3.11–3.14: сборка wheel-пакетов для Windows, Linux и macOS
@@ -387,13 +259,16 @@ jobs:
     name: Build Python ${{ matrix.python_version }} (${{ matrix.os }})
     needs: [resolve-version]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: write
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025, macos-15, macos-15-intel]
         python_version: ['3.11', '3.12', '3.13', '3.14']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.resolve-version.outputs.tag }}
 
@@ -413,7 +288,7 @@ jobs:
         with:
           prefix-key: v1-python-${{ matrix.os }}-py${{ matrix.python_version }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python_version }}
 
@@ -422,7 +297,7 @@ jobs:
 
       - name: Cache boltffi_cli
         id: cache-boltffi
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/boltffi*
           key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
@@ -444,37 +319,263 @@ jobs:
           EOF
           boltffi --overlay boltffi.ci-python.toml pack python --release --python python
 
+      # PyPI не принимает тег linux_x86_64/linux_aarch64 — перепаковываем в manylinux_*
+      - name: Repair Linux wheels for PyPI (manylinux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y patchelf
+          python -m pip install --upgrade auditwheel
+          mkdir -p dist/python/wheelhouse-repaired
+          for whl in dist/python/wheelhouse/*.whl; do
+            auditwheel repair "$whl" -w dist/python/wheelhouse-repaired/
+          done
+          rm -f dist/python/wheelhouse/*.whl
+          mv dist/python/wheelhouse-repaired/*.whl dist/python/wheelhouse/
+
       - name: Upload Python wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: python-wheels-${{ matrix.os }}-py${{ matrix.python_version }}
           path: dist/python/wheelhouse/*.whl
           if-no-files-found: error
 
-  publish-python:
-    name: Publish Python Wheels (GitHub Release)
-    needs: [resolve-version, build-python]
+      - name: Cancel workflow on failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
+
+  # ============================================================================
+  # 4. Публикация (запускается ТОЛЬКО если все 3 сборки выше прошли успешно)
+  # ============================================================================
+  publish-java:
+    name: Package & Publish Java 8 (GitHub Packages)
+    needs: [resolve-version, build-java, build-csharp, build-python]
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
+      packages: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Download Java sources
+        uses: actions/download-artifact@v7
+        with:
+          name: java-sources
+          path: java-pkg/src/main/java
+
+      - name: Download all 5 native JNI libraries
+        uses: actions/download-artifact@v7
+        with:
+          pattern: java-native-*
+          path: java-native-staging
+
+      - name: Stage native resources into Maven layout
+        run: |
+          set -euo pipefail
+          mkdir -p java-pkg/src/main/resources/native
+          for target in darwin-arm64 darwin-x86_64 linux-x86_64 linux-aarch64 windows-x86_64; do
+            src="java-native-staging/java-native-${target}"
+            if [ ! -d "$src" ] || [ -z "$(ls -A "$src")" ]; then
+              echo "::error::Отсутствует нативная библиотека для ${target}"
+              exit 1
+            fi
+            mkdir -p "java-pkg/src/main/resources/native/${target}"
+            cp "$src"/* "java-pkg/src/main/resources/native/${target}/"
+          done
+
+      - name: Generate pom.xml for Java 8 fat JAR (lowercase coordinates)
+        run: |
+          set -euo pipefail
+          GROUP_ID="$(echo "${{ env.JAVA_GROUP_ID }}" | tr '[:upper:]' '[:lower:]')"
+          ARTIFACT_ID="$(echo "${{ env.JAVA_ARTIFACT_ID }}" | tr '[:upper:]_' '[:lower:]-')"
+          REPO_LOWER="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+
+          cat <<EOF > java-pkg/pom.xml
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>${GROUP_ID}</groupId>
+            <artifactId>${ARTIFACT_ID}</artifactId>
+            <version>${{ needs.resolve-version.outputs.version }}</version>
+            <packaging>jar</packaging>
+
+            <properties>
+              <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+              <maven.compiler.release>8</maven.compiler.release>
+            </properties>
+
+            <distributionManagement>
+              <repository>
+                <id>github</id>
+                <name>GitHub Packages</name>
+                <url>https://maven.pkg.github.com/${REPO_LOWER}</url>
+              </repository>
+            </distributionManagement>
+          </project>
+          EOF
+
+      - name: Build and publish Maven JAR to GitHub Packages
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: mvn -B -f java-pkg/pom.xml deploy
+
+      - name: Cancel workflow on failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
+
+  publish-csharp:
+    name: Pack & Publish C# .NET 10 (GitHub Packages)
+    needs: [resolve-version, build-java, build-csharp, build-python]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - name: Set Cargo.toml version from Git tag
+        env:
+          PKG_VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          awk -v ver="$PKG_VERSION" '
+            !done && /^version[[:space:]]*=/ { sub(/"[^"]*"/, "\"" ver "\""); done=1 }
+            { print }
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache boltffi_cli
+        id: cache-boltffi
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/boltffi*
+          key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
+
+      - name: Install boltffi_cli
+        if: steps.cache-boltffi.outputs.cache-hit != 'true'
+        run: cargo install boltffi_cli --version "${{ env.BOLTFFI_CLI_VERSION }}" --locked
+
+      - name: Download all 6 native cdylib artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: csharp-cdylib-*
+          path: csharp-staging
+
+      - name: Place prebuilt libraries in target/<triple>/release/
+        run: |
+          set -euo pipefail
+          for dir in csharp-staging/csharp-cdylib-*; do
+            triple="${dir#csharp-staging/csharp-cdylib-}"
+            mkdir -p "target/${triple}/release"
+            cp "$dir"/* "target/${triple}/release/"
+          done
+
+      - name: Generate C# bindings and multi-RID NuGet package (.NET 10)
+        run: |
+          set -euo pipefail
+          cat <<EOF > boltffi.ci-csharp.toml
+          [targets.csharp]
+          enabled = true
+          output = "dist/csharp"
+          package_id = "${{ env.CSHARP_PACKAGE_ID }}"
+          target_framework = "net10.0"
+          runtime_identifiers = ["osx-arm64", "osx-x64", "linux-x64", "linux-arm64", "win-x64", "win-arm64"]
+          EOF
+          boltffi --overlay boltffi.ci-csharp.toml pack csharp --release --no-build
+
+          CSPROJ="$(find dist/csharp -maxdepth 1 -name '*.csproj' | head -n 1)"
+          if [ -z "$CSPROJ" ]; then
+            echo "::error::Не найден .csproj файл в dist/csharp"
+            exit 1
+          fi
+
+          rm -f dist/csharp/packages/*.nupkg
+          dotnet pack "$CSPROJ" \
+            -c Release \
+            -p:PackageVersion="${{ needs.resolve-version.outputs.version }}" \
+            -p:RepositoryUrl="https://github.com/${{ github.repository }}" \
+            -o dist/csharp/packages
+
+      - name: Push NuGet package to GitHub Packages
+        run: |
+          OWNER_LOWER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          dotnet nuget push "dist/csharp/packages/*.nupkg" \
+            --api-key "${{ secrets.GITHUB_TOKEN }}" \
+            --source "https://nuget.pkg.github.com/${OWNER_LOWER}/index.json" \
+            --skip-duplicate
+
+      - name: Cancel workflow on failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
+
+  publish-python:
+    name: Publish Python Wheels to PyPI
+    needs: [resolve-version, build-java, build-csharp, build-python]
+    runs-on: ubuntu-24.04
+    # Изолированный job: нет actions/checkout и нет стороннего кода сборки
+    environment: pypi
+    permissions:
+      id-token: write
+      actions: write
+    env:
+      # В env попадает только флаг 'true'/'false', само значение секрета сюда не передаётся
+      HAS_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN != '' }}
     steps:
       - name: Download all Python wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: python-wheels-*
           merge-multiple: true
           path: wheelhouse
 
-      # GitHub Packages не поддерживает PyPI/Python, поэтому загружаем .whl в GitHub Release
-      - name: Attach wheels to GitHub Release
-        uses: softprops/action-gh-release@v2
+      # Вариант 1: публикация через секрет PYPI_API_TOKEN (если он задан в GitHub Secrets / Environment 'pypi')
+      - name: Publish to PyPI (API Token)
+        if: env.HAS_PYPI_TOKEN == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          tag_name: ${{ needs.resolve-version.outputs.tag }}
-          files: wheelhouse/*.whl
+          packages-dir: wheelhouse/
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
-      # Если требуется публикация в PyPI (или приватный PyPI-репозиторий), раскомментируйте:
-      # - name: Publish to PyPI
-      #   uses: pypa/gh-action-pypi-publish@release/v1
-      #   with:
-      #     packages-dir: wheelhouse/
-      #     # password: ${{ secrets.PYPI_API_TOKEN }}
+      # Вариант 2 (рекомендуемый): публикация без токена по OIDC (Trusted Publishing)
+      - name: Publish to PyPI (OIDC Trusted Publishing)
+        if: env.HAS_PYPI_TOKEN != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheelhouse/
+
+      - name: Cancel workflow on failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
