@@ -1,0 +1,480 @@
+name: Build & Publish BoltFFI Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git-тег для сборки (необязательно, если запуск сделан напрямую от тега в UI GitHub)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Версия boltffi_cli должна совпадать с версией крейта boltffi в Cargo.toml
+  BOLTFFI_CLI_VERSION: "0.32.1"
+  # Координаты Maven-пакета для Java
+  JAVA_GROUP_ID: "io.github.${{ github.repository_owner }}"
+  JAVA_ARTIFACT_ID: "${{ github.event.repository.name }}"
+  # Название C# NuGet-пакета и Python-модуля (можно переопределить или брать из boltffi.toml)
+  CSHARP_PACKAGE_ID: "MyOrg.MyLib"
+  PYTHON_MODULE_NAME: "mylib"
+
+jobs:
+  # ============================================================================
+  # 0. Определение Git-тега и версии пакетов
+  # ============================================================================
+  resolve-version:
+    name: Resolve Git Tag Version
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine tag and semver version
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="$(git describe --tags --exact-match HEAD 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || true)"
+          fi
+
+          if [ -z "${TAG}" ]; then
+            echo "::error::Не найден Git-тег. Запустите workflow от тега в UI GitHub или укажите тег в параметре 'tag'."
+            exit 1
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::Тег '${TAG}' не существует в репозитории."
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          echo "Resolved tag=${TAG}, version=${VERSION}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+  # ============================================================================
+  # 1. Java 8: сборка JNI-библиотек под 5 платформ и публикация единого JAR
+  # ============================================================================
+  build-java:
+    name: Build Java Native (${{ matrix.java_target }})
+    needs: [resolve-version]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - java_target: darwin-arm64
+            os: macos-15
+          - java_target: darwin-x86_64
+            os: macos-15-intel
+          - java_target: linux-x86_64
+            os: ubuntu-24.04
+          - java_target: linux-aarch64
+            os: ubuntu-24.04-arm
+          - java_target: windows-x86_64
+            os: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - name: Set Cargo.toml version from Git tag
+        shell: bash
+        env:
+          PKG_VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          awk -v ver="$PKG_VERSION" '
+            !done && /^version[[:space:]]*=/ { sub(/"[^"]*"/, "\"" ver "\""); done=1 }
+            { print }
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-java-${{ matrix.java_target }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install clang (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Cache boltffi_cli
+        id: cache-boltffi
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/boltffi*
+          key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
+
+      - name: Install boltffi_cli
+        if: steps.cache-boltffi.outputs.cache-hit != 'true'
+        run: cargo install boltffi_cli --version "${{ env.BOLTFFI_CLI_VERSION }}" --locked
+
+      - name: Pack Java JNI for ${{ matrix.java_target }}
+        shell: bash
+        run: |
+          cat <<'EOF' > boltffi.ci-java.toml
+          [targets.java]
+          min_version = 8
+
+          [targets.java.jvm]
+          enabled = true
+          host_targets = ["current"]
+          EOF
+          boltffi --overlay boltffi.ci-java.toml pack java --release
+
+      - name: Upload native library (${{ matrix.java_target }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-native-${{ matrix.java_target }}
+          path: dist/java/native/${{ matrix.java_target }}/*
+          if-no-files-found: error
+
+      - name: Upload generated Java 8 sources
+        if: matrix.java_target == 'linux-x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-sources
+          path: dist/java/**/*.java
+          if-no-files-found: error
+
+  publish-java:
+    name: Package & Publish Java 8 (GitHub Packages)
+    needs: [resolve-version, build-java]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Download Java sources
+        uses: actions/download-artifact@v4
+        with:
+          name: java-sources
+          path: java-pkg/src/main/java
+
+      - name: Download all 5 native JNI libraries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: java-native-*
+          path: java-native-staging
+
+      - name: Stage native resources into Maven layout
+        run: |
+          set -euo pipefail
+          mkdir -p java-pkg/src/main/resources/native
+          for target in darwin-arm64 darwin-x86_64 linux-x86_64 linux-aarch64 windows-x86_64; do
+            src="java-native-staging/java-native-${target}"
+            if [ ! -d "$src" ] || [ -z "$(ls -A "$src")" ]; then
+              echo "::error::Отсутствует нативная библиотека для ${target}"
+              exit 1
+            fi
+            mkdir -p "java-pkg/src/main/resources/native/${target}"
+            cp "$src"/* "java-pkg/src/main/resources/native/${target}/"
+          done
+
+      - name: Generate pom.xml for Java 8 fat JAR
+        run: |
+          cat <<EOF > java-pkg/pom.xml
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>${{ env.JAVA_GROUP_ID }}</groupId>
+            <artifactId>${{ env.JAVA_ARTIFACT_ID }}</artifactId>
+            <version>${{ needs.resolve-version.outputs.version }}</version>
+            <packaging>jar</packaging>
+
+            <properties>
+              <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+              <maven.compiler.release>8</maven.compiler.release>
+            </properties>
+
+            <distributionManagement>
+              <repository>
+                <id>github</id>
+                <name>GitHub Packages</name>
+                <url>https://maven.pkg.github.com/${{ github.repository }}</url>
+              </repository>
+            </distributionManagement>
+          </project>
+          EOF
+
+      - name: Build and publish Maven JAR to GitHub Packages
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: mvn -B -f java-pkg/pom.xml deploy
+
+  # ============================================================================
+  # 2. C# .NET 10: сборка cdylib для 6 RID и публикация единого NuGet-пакета
+  # ============================================================================
+  build-csharp:
+    name: Build C# Native (${{ matrix.rid }})
+    needs: [resolve-version]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: osx-arm64
+            os: macos-15
+            rust_target: aarch64-apple-darwin
+          - rid: osx-x64
+            os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+          - rid: linux-x64
+            os: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+          - rid: linux-arm64
+            os: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+          - rid: win-x64
+            os: windows-2025
+            rust_target: x86_64-pc-windows-msvc
+          - rid: win-arm64
+            os: windows-11-arm
+            rust_target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - name: Set Cargo.toml version from Git tag
+        shell: bash
+        env:
+          PKG_VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          awk -v ver="$PKG_VERSION" '
+            !done && /^version[[:space:]]*=/ { sub(/"[^"]*"/, "\"" ver "\""); done=1 }
+            { print }
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-csharp-${{ matrix.rid }}
+
+      - name: Build Rust cdylib for ${{ matrix.rust_target }}
+        run: cargo build --release --locked --target ${{ matrix.rust_target }}
+
+      - name: Upload native cdylib (${{ matrix.rid }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: csharp-cdylib-${{ matrix.rust_target }}
+          path: |
+            target/${{ matrix.rust_target }}/release/*.so
+            target/${{ matrix.rust_target }}/release/*.dylib
+            target/${{ matrix.rust_target }}/release/*.dll
+          if-no-files-found: error
+
+  publish-csharp:
+    name: Pack & Publish C# .NET 10 (GitHub Packages)
+    needs: [resolve-version, build-csharp]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - name: Set Cargo.toml version from Git tag
+        env:
+          PKG_VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          awk -v ver="$PKG_VERSION" '
+            !done && /^version[[:space:]]*=/ { sub(/"[^"]*"/, "\"" ver "\""); done=1 }
+            { print }
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache boltffi_cli
+        id: cache-boltffi
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/boltffi*
+          key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
+
+      - name: Install boltffi_cli
+        if: steps.cache-boltffi.outputs.cache-hit != 'true'
+        run: cargo install boltffi_cli --version "${{ env.BOLTFFI_CLI_VERSION }}" --locked
+
+      - name: Download all 6 native cdylib artifacts into target/
+        uses: actions/download-artifact@v4
+        with:
+          pattern: csharp-cdylib-*
+          path: csharp-staging
+
+      - name: Place prebuilt libraries in target/<triple>/release/
+        run: |
+          set -euo pipefail
+          for dir in csharp-staging/csharp-cdylib-*; do
+            triple="${dir#csharp-staging/csharp-cdylib-}"
+            mkdir -p "target/${triple}/release"
+            cp "$dir"/* "target/${triple}/release/"
+          done
+
+      - name: Generate C# bindings and multi-RID NuGet package (.NET 10)
+        run: |
+          cat <<EOF > boltffi.ci-csharp.toml
+          [targets.csharp]
+          enabled = true
+          output = "dist/csharp"
+          package_id = "${{ env.CSHARP_PACKAGE_ID }}"
+          target_framework = "net10.0"
+          runtime_identifiers = ["osx-arm64", "osx-x64", "linux-x64", "linux-arm64", "win-x64", "win-arm64"]
+          EOF
+          boltffi --overlay boltffi.ci-csharp.toml pack csharp --release --no-build
+
+          # Перепаковка через dotnet pack с RepositoryUrl для корректной привязки к GitHub Packages
+          rm -f dist/csharp/packages/*.nupkg
+          dotnet pack dist/csharp/BoltFFI.CSharp.csproj \
+            -c Release \
+            -p:PackageVersion="${{ needs.resolve-version.outputs.version }}" \
+            -p:RepositoryUrl="https://github.com/${{ github.repository }}" \
+            -o dist/csharp/packages
+
+      - name: Push NuGet package to GitHub Packages
+        run: |
+          dotnet nuget push "dist/csharp/packages/*.nupkg" \
+            --api-key "${{ secrets.GITHUB_TOKEN }}" \
+            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+            --skip-duplicate
+
+  # ============================================================================
+  # 3. Python 3.11–3.14: сборка wheel-пакетов для Windows, Linux и macOS
+  # ============================================================================
+  build-python:
+    name: Build Python ${{ matrix.python_version }} (${{ matrix.os }})
+    needs: [resolve-version]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025, macos-15, macos-15-intel]
+        python_version: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.tag }}
+
+      - name: Set Cargo.toml version from Git tag
+        shell: bash
+        env:
+          PKG_VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          awk -v ver="$PKG_VERSION" '
+            !done && /^version[[:space:]]*=/ { sub(/"[^"]*"/, "\"" ver "\""); done=1 }
+            { print }
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-python-${{ matrix.os }}-py${{ matrix.python_version }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Install Python build dependencies
+        run: python -m pip install --upgrade pip setuptools wheel
+
+      - name: Cache boltffi_cli
+        id: cache-boltffi
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/boltffi*
+          key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
+
+      - name: Install boltffi_cli
+        if: steps.cache-boltffi.outputs.cache-hit != 'true'
+        run: cargo install boltffi_cli --version "${{ env.BOLTFFI_CLI_VERSION }}" --locked
+
+      - name: Pack Python wheel
+        shell: bash
+        run: |
+          cat <<EOF > boltffi.ci-python.toml
+          [targets.python]
+          enabled = true
+          module_name = "${{ env.PYTHON_MODULE_NAME }}"
+
+          [targets.python.wheel]
+          output = "dist/python/wheelhouse"
+          EOF
+          boltffi --overlay boltffi.ci-python.toml pack python --release --python python
+
+      - name: Upload Python wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheels-${{ matrix.os }}-py${{ matrix.python_version }}
+          path: dist/python/wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish-python:
+    name: Publish Python Wheels (GitHub Release)
+    needs: [resolve-version, build-python]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all Python wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-wheels-*
+          merge-multiple: true
+          path: wheelhouse
+
+      # GitHub Packages не поддерживает PyPI/Python, поэтому загружаем .whl в GitHub Release
+      - name: Attach wheels to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-version.outputs.tag }}
+          files: wheelhouse/*.whl
+
+      # Если требуется публикация в PyPI (или приватный PyPI-репозиторий), раскомментируйте:
+      # - name: Publish to PyPI
+      #   uses: pypa/gh-action-pypi-publish@release/v1
+      #   with:
+      #     packages-dir: wheelhouse/
+      #     # password: ${{ secrets.PYPI_API_TOKEN }}
