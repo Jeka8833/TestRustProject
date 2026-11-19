@@ -7,6 +7,11 @@ on:
         description: 'Git-тег для сборки (необязательно, если запуск сделан напрямую от тега в UI GitHub)'
         required: false
         type: string
+      use_test_pypi:
+        description: 'Публиковать Python-пакеты в TestPyPI (test.pypi.org) вместо основного PyPI'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -231,7 +236,6 @@ jobs:
         with:
           prefix-key: v1-csharp-${{ matrix.rid }}
 
-      # Без --locked, т.к. версия корневого Cargo.toml только что обновлена из Git-тега
       - name: Build Rust cdylib for ${{ matrix.rust_target }}
         run: cargo build --release --target ${{ matrix.rust_target }}
 
@@ -319,7 +323,6 @@ jobs:
           EOF
           boltffi --overlay boltffi.ci-python.toml pack python --release --python python
 
-      # PyPI не принимает тег linux_x86_64/linux_aarch64 — перепаковываем в manylinux_*
       - name: Repair Linux wheels for PyPI (manylinux)
         if: runner.os == 'Linux'
         shell: bash
@@ -540,15 +543,14 @@ jobs:
 
   publish-python:
     name: Publish Python Wheels to PyPI
+    if: ${{ !inputs.use_test_pypi }}
     needs: [resolve-version, build-java, build-csharp, build-python]
     runs-on: ubuntu-24.04
-    # Изолированный job: нет actions/checkout и нет стороннего кода сборки
     environment: pypi
     permissions:
       id-token: write
       actions: write
     env:
-      # В env попадает только флаг 'true'/'false', само значение секрета сюда не передаётся
       HAS_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN != '' }}
     steps:
       - name: Download all Python wheels
@@ -558,7 +560,6 @@ jobs:
           merge-multiple: true
           path: wheelhouse
 
-      # Вариант 1: публикация через секрет PYPI_API_TOKEN (если он задан в GitHub Secrets / Environment 'pypi')
       - name: Publish to PyPI (API Token)
         if: env.HAS_PYPI_TOKEN == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -566,12 +567,52 @@ jobs:
           packages-dir: wheelhouse/
           password: ${{ secrets.PYPI_API_TOKEN }}
 
-      # Вариант 2 (рекомендуемый): публикация без токена по OIDC (Trusted Publishing)
       - name: Publish to PyPI (OIDC Trusted Publishing)
         if: env.HAS_PYPI_TOKEN != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: wheelhouse/
+
+      - name: Cancel workflow on failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
+
+  publish-testpypi:
+    name: Publish Python Wheels to TestPyPI
+    if: ${{ inputs.use_test_pypi }}
+    needs: [resolve-version, build-java, build-csharp, build-python]
+    runs-on: ubuntu-24.04
+    environment: testpypi
+    permissions:
+      id-token: write
+      actions: write
+    env:
+      HAS_TEST_PYPI_TOKEN: ${{ secrets.TEST_PYPI_API_TOKEN != '' }}
+    steps:
+      - name: Download all Python wheels
+        uses: actions/download-artifact@v7
+        with:
+          pattern: python-wheels-*
+          merge-multiple: true
+          path: wheelhouse
+
+      - name: Publish to TestPyPI (API Token)
+        if: env.HAS_TEST_PYPI_TOKEN == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheelhouse/
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+
+      - name: Publish to TestPyPI (OIDC Trusted Publishing)
+        if: env.HAS_TEST_PYPI_TOKEN != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheelhouse/
+          repository-url: https://test.pypi.org/legacy/
 
       - name: Cancel workflow on failure
         if: failure()
