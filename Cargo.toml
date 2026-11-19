@@ -1,6 +1,6 @@
 [package]
 name = "BlendshapeRouterV2"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2024"
 
 description = "Краткое описание библиотеки (1–2 предложения)"
@@ -9,6 +9,23 @@ license = "MIT"
 authors = ["Jeka8833 <your@email.com>"]
 repository = "https://github.com/Jeka8833/TestRustProject"
 homepage = "https://github.com/Jeka8833/TestRustProject"
+
+[package.metadata.pypi]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[package.metadata.pypi.urls]
+Issues = "https://github.com/Jeka8833/TestRustProject/issues"
 
 [lib]
 crate-type = ["staticlib", "cdylib"]
