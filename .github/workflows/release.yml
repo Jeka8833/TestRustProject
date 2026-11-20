@@ -309,7 +309,7 @@ jobs:
         shell: bash
         run: |
           python - <<'EOF'
-          import os, pathlib, re, shutil, tomllib, tomli_w
+          import ast, os, pathlib, re, shutil, tomllib, tomli_w
 
           cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
           pkg = cargo.get("package", {})
@@ -344,18 +344,34 @@ jobs:
           if repository.startswith("https://github.com/") and "issues" not in lower_labels and "bug tracker" not in lower_labels:
               custom_urls.setdefault("Issues", f"{repository.rstrip('/')}/issues")
 
+          _NON_LITERAL = object()
+          setup_py_path = pathlib.Path("dist/python/setup.py")
+          setup_py_text = setup_py_path.read_text(encoding="utf-8") if setup_py_path.is_file() else ""
+          setup_kwargs = {}
+          if setup_py_text:
+              tree = ast.parse(setup_py_text)
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Call) and (
+                      (isinstance(node.func, ast.Name) and node.func.id == "setup")
+                      or (isinstance(node.func, ast.Attribute) and node.func.attr == "setup")
+                  ):
+                      for kw in node.keywords:
+                          if kw.arg:
+                              try:
+                                  setup_kwargs[kw.arg] = ast.literal_eval(kw.value)
+                              except Exception:
+                                  setup_kwargs[kw.arg] = _NON_LITERAL
+
           pyproject_path = pathlib.Path("dist/python/pyproject.toml")
           pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
           project = pyproject.setdefault("project", {})
           dynamic = set(project.get("dynamic", []))
 
           if "name" not in project and "name" not in dynamic:
-              setup_py = pathlib.Path("dist/python/setup.py")
-              if setup_py.is_file():
-                  m = re.search(r"""name\s*=\s*['"]([^'"]+)['"]""", setup_py.read_text(encoding="utf-8"))
-                  if m:
-                      project["name"] = m.group(1)
-              if "name" not in project:
+              setup_name = setup_kwargs.get("name")
+              if isinstance(setup_name, str) and setup_name.strip():
+                  project["name"] = setup_name.strip()
+              else:
                   pkg_name = str(get_meta("name", "")).strip()
                   if pkg_name:
                       project["name"] = pkg_name
@@ -363,6 +379,14 @@ jobs:
           if version:
               project["version"] = version
               dynamic.discard("version")
+
+          if "requires-python" not in project:
+              py_req = setup_kwargs.get("python_requires")
+              if isinstance(py_req, str) and py_req.strip():
+                  project["requires-python"] = py_req.strip()
+                  dynamic.discard("requires-python")
+              elif py_req is not None or "python_requires" in setup_py_text:
+                  dynamic.add("requires-python")
 
           if summary:
               project["description"] = summary
@@ -409,11 +433,43 @@ jobs:
               project["readme"] = {"file": "README.md", "content-type": "text/markdown"}
               dynamic.discard("readme")
 
-          if "dynamic" in project:
-              if dynamic:
-                  project["dynamic"] = sorted(dynamic)
+          setup_to_pep621 = {
+              "description": "description",
+              "long_description": "readme",
+              "license": "license",
+              "author": "authors",
+              "author_email": "authors",
+              "maintainer": "maintainers",
+              "maintainer_email": "maintainers",
+              "keywords": "keywords",
+              "classifiers": "classifiers",
+              "url": "urls",
+              "project_urls": "urls",
+              "install_requires": "dependencies",
+              "extras_require": "optional-dependencies",
+          }
+          for setup_key, pep_key in setup_to_pep621.items():
+              if pep_key not in project and setup_key in setup_kwargs and setup_kwargs[setup_key]:
+                  dynamic.add(pep_key)
+
+          if "entry_points" in setup_kwargs and setup_kwargs["entry_points"]:
+              ep = setup_kwargs["entry_points"]
+              if isinstance(ep, dict):
+                  if "scripts" not in project and ep.get("console_scripts"):
+                      dynamic.add("scripts")
+                  if "gui-scripts" not in project and ep.get("gui_scripts"):
+                      dynamic.add("gui-scripts")
+                  if "entry-points" not in project and any(k not in ("console_scripts", "gui_scripts") for k in ep):
+                      dynamic.add("entry-points")
               else:
-                  del project["dynamic"]
+                  for k in ("scripts", "gui-scripts", "entry-points"):
+                      if k not in project:
+                          dynamic.add(k)
+
+          if dynamic:
+              project["dynamic"] = sorted(dynamic)
+          elif "dynamic" in project:
+              del project["dynamic"]
 
           pyproject_path.write_text(tomli_w.dumps(pyproject), encoding="utf-8")
           EOF
