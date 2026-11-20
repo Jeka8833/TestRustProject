@@ -5,19 +5,18 @@ inputs:
   version:
     description: Exact version of boltffi_cli to install
     default: "0.32.1"
-    required: false
 
 runs:
   using: composite
   steps:
     - name: Cache boltffi_cli
-      id: cache-boltffi
+      id: cache
       uses: actions/cache@v6
       with:
         path: ~/.cargo/bin/boltffi*
         key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}
 
     - name: Install boltffi_cli
-      if: steps.cache-boltffi.outputs.cache-hit != 'true'
+      if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       run: cargo install boltffi_cli --version "${{ inputs.version }}" --locked
