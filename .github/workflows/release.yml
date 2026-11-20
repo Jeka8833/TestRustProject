@@ -19,20 +19,20 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   BOLTFFI_CLI_VERSION: "0.32.1"
-  JAVA_GROUP_ID: "io.github.${{ github.repository_owner }}"
+  JAVA_GROUP_ID: "com.${{ github.repository_owner }}"
   JAVA_ARTIFACT_ID: "${{ github.event.repository.name }}"
 
 jobs:
   resolve-version:
-    name: Resolve Version from Cargo.toml
+    name: Resolve Version
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      actions: write
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
       - name: Read version from Cargo.toml
         id: resolve
@@ -56,22 +56,15 @@ jobs:
               f.write(f"version={version}\n")
           EOF
 
-      - name: Cancel workflow on failure
-        if: failure()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
-
   test:
     name: Run Rust Tests
     needs: [ resolve-version ]
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      actions: write
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -80,19 +73,13 @@ jobs:
           prefix-key: v1-test
 
       - name: Run cargo test
-        run: cargo test
-
-      - name: Cancel workflow on failure
-        if: failure()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}" || true
+        run: cargo test --locked
 
   build-java:
     name: Build Java Native (${{ matrix.java_target }})
-    needs: [ resolve-version ]
+    needs: [ resolve-version, test ]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: write
@@ -112,6 +99,8 @@ jobs:
             os: windows-2025
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -126,18 +115,22 @@ jobs:
 
       - name: Install clang (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang
 
-      - name: Cache boltffi_cli
-        id: cache-boltffi
-        uses: actions/cache@v6
+      - name: Set macOS deployment target
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ "$(uname -m)" = "arm64" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+          else
+            echo "MACOSX_DEPLOYMENT_TARGET=10.15" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup boltffi_cli
+        uses: ./.github/actions/setup-boltffi
         with:
-          path: ~/.cargo/bin/boltffi*
-          key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
-
-      - name: Install boltffi_cli
-        if: steps.cache-boltffi.outputs.cache-hit != 'true'
-        run: cargo install boltffi_cli --version "${{ env.BOLTFFI_CLI_VERSION }}" --locked
+          version: ${{ env.BOLTFFI_CLI_VERSION }}
 
       - name: Pack Java JNI for ${{ matrix.java_target }}
         shell: bash
@@ -157,6 +150,7 @@ jobs:
         with:
           name: java-native-${{ matrix.java_target }}
           path: dist/java/native/${{ matrix.java_target }}/*
+          retention-days: 1
           if-no-files-found: error
 
       - name: Archive generated Java 8 sources
@@ -173,6 +167,7 @@ jobs:
         with:
           name: java-sources
           path: java-sources.tar
+          retention-days: 1
           if-no-files-found: error
 
       - name: Cancel workflow on failure
@@ -184,8 +179,9 @@ jobs:
 
   build-csharp:
     name: Build C# Native (${{ matrix.rid }})
-    needs: [ resolve-version ]
+    needs: [ resolve-version, test ]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: write
@@ -213,6 +209,8 @@ jobs:
             rust_target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -222,8 +220,18 @@ jobs:
         with:
           prefix-key: v1-csharp-${{ matrix.rid }}
 
+      - name: Set macOS deployment target
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ "$(uname -m)" = "arm64" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+          else
+            echo "MACOSX_DEPLOYMENT_TARGET=10.15" >> "$GITHUB_ENV"
+          fi
+
       - name: Build Rust cdylib for ${{ matrix.rust_target }}
-        run: cargo build --release --target ${{ matrix.rust_target }}
+        run: cargo build --release --locked --target ${{ matrix.rust_target }}
 
       - name: Upload native cdylib (${{ matrix.rid }})
         uses: actions/upload-artifact@v7
@@ -233,6 +241,7 @@ jobs:
             target/${{ matrix.rust_target }}/release/*.so
             target/${{ matrix.rust_target }}/release/*.dylib
             target/${{ matrix.rust_target }}/release/*.dll
+          retention-days: 1
           if-no-files-found: error
 
       - name: Cancel workflow on failure
@@ -244,8 +253,9 @@ jobs:
 
   build-python:
     name: Build Python Wheels (${{ matrix.os }})
-    needs: [ resolve-version ]
+    needs: [ resolve-version, test ]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: write
@@ -255,6 +265,8 @@ jobs:
         os: [ ubuntu-24.04, ubuntu-24.04-arm, windows-2025, macos-15, macos-15-intel ]
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -267,18 +279,12 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python build dependencies
-        run: python -m pip install --upgrade pip setuptools wheel
+        run: python -m pip install --upgrade pip setuptools wheel tomli-w
 
-      - name: Cache boltffi_cli
-        id: cache-boltffi
-        uses: actions/cache@v6
+      - name: Setup boltffi_cli
+        uses: ./.github/actions/setup-boltffi
         with:
-          path: ~/.cargo/bin/boltffi*
-          key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
-
-      - name: Install boltffi_cli
-        if: steps.cache-boltffi.outputs.cache-hit != 'true'
-        run: cargo install boltffi_cli --version "${{ env.BOLTFFI_CLI_VERSION }}" --locked
+          version: ${{ env.BOLTFFI_CLI_VERSION }}
 
       - name: Set macOS deployment target
         if: runner.os == 'macOS'
@@ -304,6 +310,103 @@ jobs:
           rm -rf dist/python/wheelhouse dist/python/build dist/python/*.egg-info
           find dist/python -maxdepth 2 \( -name '_native*.so' -o -name '_native*.pyd' \) -delete
 
+      - name: Populate pyproject.toml metadata and README from Cargo.toml
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import os, pathlib, re, shutil, tomllib, tomli_w
+
+          cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+          pkg = cargo.get("package", {})
+          ws_pkg = cargo.get("workspace", {}).get("package", {})
+
+          def get_meta(key, default=None):
+              val = pkg.get(key)
+              if isinstance(val, dict) and val.get("workspace") is True:
+                  val = ws_pkg.get(key, default)
+              return default if val is None else val
+
+          summary = " ".join(str(get_meta("description", "")).split())
+          license_str = str(get_meta("license", "")).strip()
+          authors_val = get_meta("authors", [])
+          homepage = str(get_meta("homepage", "")).strip()
+          repository = str(get_meta("repository", "")).strip() or f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
+
+          pypi_meta = pkg.get("metadata", {}).get("pypi") or cargo.get("workspace", {}).get("metadata", {}).get("pypi", {})
+          classifiers = [str(c).strip() for c in pypi_meta.get("classifiers", []) if str(c).strip()]
+          custom_urls = {
+              str(k).strip(): str(v).strip()
+              for k, v in pypi_meta.get("urls", {}).items()
+              if str(k).strip() and str(v).strip()
+          }
+
+          lower_labels = {k.lower() for k in custom_urls}
+          if homepage and "homepage" not in lower_labels:
+              custom_urls.setdefault("Homepage", homepage)
+          if repository and "repository" not in lower_labels and "source" not in lower_labels:
+              custom_urls.setdefault("Repository", repository)
+          if repository.startswith("https://github.com/") and "issues" not in lower_labels and "bug tracker" not in lower_labels:
+              custom_urls.setdefault("Issues", f"{repository.rstrip('/')}/issues")
+
+          pyproject_path = pathlib.Path("dist/python/pyproject.toml")
+          pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+          project = pyproject.setdefault("project", {})
+          dynamic = set(project.get("dynamic", []))
+
+          if summary:
+              project["description"] = summary
+              dynamic.discard("description")
+
+          if license_str:
+              project["license"] = {"text": license_str}
+              dynamic.discard("license")
+
+          if isinstance(authors_val, list):
+              parsed_authors = []
+              for raw in authors_val:
+                  raw = str(raw).strip()
+                  if not raw:
+                      continue
+                  m = re.match(r"^(.*?)\s*<([^>]+)>$", raw)
+                  if m:
+                      entry = {}
+                      if m.group(1).strip():
+                          entry["name"] = m.group(1).strip()
+                      if m.group(2).strip():
+                          entry["email"] = m.group(2).strip()
+                      if entry:
+                          parsed_authors.append(entry)
+                  else:
+                      parsed_authors.append({"name": raw})
+              if parsed_authors:
+                  project["authors"] = parsed_authors
+                  dynamic.discard("authors")
+
+          if classifiers:
+              project["classifiers"] = classifiers
+              dynamic.discard("classifiers")
+
+          if custom_urls:
+              urls = project.setdefault("urls", {})
+              urls.update(custom_urls)
+              dynamic.discard("urls")
+
+          readme_cfg = get_meta("readme", "README.md")
+          readme_src = pathlib.Path(readme_cfg if isinstance(readme_cfg, str) else "README.md")
+          if readme_src.is_file():
+              shutil.copyfile(readme_src, pathlib.Path("dist/python/README.md"))
+              project["readme"] = {"file": "README.md", "content-type": "text/markdown"}
+              dynamic.discard("readme")
+
+          if "dynamic" in project:
+              if dynamic:
+                  project["dynamic"] = sorted(dynamic)
+              else:
+                  del project["dynamic"]
+
+          pyproject_path.write_text(tomli_w.dumps(pyproject), encoding="utf-8")
+          EOF
+
       - name: Build Python wheels with cibuildwheel
         uses: pypa/cibuildwheel@v4.3.5
         with:
@@ -317,137 +420,15 @@ jobs:
             set -eu &&
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal &&
             . "$HOME/.cargo/env" &&
-            cargo build --release --manifest-path "{project}/Cargo.toml" --target-dir /tmp/cibw-target &&
+            cargo build --release --locked --manifest-path "{project}/Cargo.toml" --target-dir /tmp/cibw-target &&
             find "{package}" -maxdepth 2 -name '*.so' -type f -exec sh -c 'for f do cp "/tmp/cibw-target/release/$(basename "$f")" "$f"; done' sh {} +
-
-      - name: Inject README and Cargo.toml metadata into Python wheels
-        shell: bash
-        run: |
-          python - <<'EOF'
-          import base64, hashlib, os, pathlib, re, tomllib, zipfile
-
-          cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
-          pkg = cargo.get("package", {})
-          ws_pkg = cargo.get("workspace", {}).get("package", {})
-
-          def get_meta(key, default=""):
-              val = pkg.get(key)
-              if isinstance(val, dict) and val.get("workspace") is True:
-                  val = ws_pkg.get(key, default)
-              return default if val is None else val
-
-          summary = " ".join(str(get_meta("description", "")).split())
-          license_str = str(get_meta("license", "")).strip()
-          authors_val = get_meta("authors", [])
-          authors = ", ".join(str(a) for a in authors_val if str(a).strip()) if isinstance(authors_val, list) else ""
-          homepage = str(get_meta("homepage", "")).strip()
-          repository = str(get_meta("repository", "")).strip() or f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
-
-          pypi_meta = pkg.get("metadata", {}).get("pypi") or cargo.get("workspace", {}).get("metadata", {}).get("pypi", {})
-          classifiers = [str(c).strip() for c in pypi_meta.get("classifiers", []) if str(c).strip()]
-          custom_urls = {
-              str(k).strip(): str(v).strip()
-              for k, v in pypi_meta.get("urls", {}).items()
-              if str(k).strip() and str(v).strip()
-          }
-
-          lower_labels = {k.lower() for k in custom_urls}
-          if repository and "repository" not in lower_labels and "source" not in lower_labels:
-              custom_urls.setdefault("Repository", repository)
-          if repository.startswith("https://github.com/") and "issues" not in lower_labels and "bug tracker" not in lower_labels:
-              custom_urls.setdefault("Issues", f"{repository.rstrip('/')}/issues")
-
-          readme_cfg = get_meta("readme", "README.md")
-          readme_path = pathlib.Path(readme_cfg if isinstance(readme_cfg, str) else "README.md")
-          readme_text = readme_path.read_text(encoding="utf-8") if readme_path.is_file() else ""
-
-          for whl in pathlib.Path("wheelhouse").glob("*.whl"):
-              with zipfile.ZipFile(whl, "r") as zin:
-                  items = [(info, zin.read(info.filename)) for info in zin.infolist()]
-
-              meta_name = next(i.filename for i, _ in items if i.filename.endswith(".dist-info/METADATA"))
-              rec_name = next(i.filename for i, _ in items if i.filename.endswith(".dist-info/RECORD"))
-
-              raw_meta = dict((i.filename, data) for i, data in items)[meta_name].decode("utf-8")
-              parts = re.split(r"\r?\n\r?\n", raw_meta, maxsplit=1)
-              header_lines = parts[0].splitlines()
-              body = parts[1] if len(parts) > 1 else ""
-
-              drop_prefixes = (
-                  "summary:",
-                  "description-content-type:",
-                  "home-page:",
-                  "author:",
-                  "license:",
-                  "license-expression:",
-                  "project-url:",
-                  "classifier:",
-              )
-              filtered = []
-              skip_cont = False
-              for line in header_lines:
-                  if line[:1] in (" ", "\t"):
-                      if not skip_cont:
-                          filtered.append(line)
-                      continue
-                  skip_cont = line.lower().startswith(drop_prefixes)
-                  if not skip_cont:
-                      filtered.append(line)
-
-              for idx, line in enumerate(filtered):
-                  if line.lower().startswith("metadata-version:"):
-                      ver_val = line.split(":", 1)[1].strip()
-                      try:
-                          if tuple(int(x) for x in ver_val.split(".")[:2]) < (2, 1):
-                              filtered[idx] = "Metadata-Version: 2.1"
-                      except ValueError:
-                          filtered[idx] = "Metadata-Version: 2.1"
-
-              if summary:
-                  filtered.append(f"Summary: {summary}")
-              if homepage and "homepage" not in lower_labels:
-                  filtered.append(f"Home-page: {homepage}")
-              for label, url in custom_urls.items():
-                  filtered.append(f"Project-URL: {label}, {url}")
-              if authors:
-                  filtered.append(f"Author: {authors}")
-              if license_str:
-                  filtered.append(f"License: {license_str}")
-              for clf in classifiers:
-                  filtered.append(f"Classifier: {clf}")
-              if readme_text:
-                  filtered.append("Description-Content-Type: text/markdown")
-                  body = readme_text.replace("\r\n", "\n").rstrip() + "\n"
-
-              new_meta = ("\n".join(filtered) + "\n\n" + body).encode("utf-8")
-              meta_sha = base64.urlsafe_b64encode(hashlib.sha256(new_meta).digest()).rstrip(b"=").decode("ascii")
-
-              raw_rec = dict((i.filename, data) for i, data in items)[rec_name].decode("utf-8")
-              new_rec_lines = []
-              for line in raw_rec.splitlines():
-                  if line.split(",", 1)[0] == meta_name:
-                      new_rec_lines.append(f"{meta_name},sha256={meta_sha},{len(new_meta)}")
-                  else:
-                      new_rec_lines.append(line)
-              new_rec = ("\n".join(new_rec_lines) + "\n").encode("utf-8")
-
-              tmp_whl = whl.with_suffix(".whl.tmp")
-              with zipfile.ZipFile(tmp_whl, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-                  for info, data in items:
-                      if info.filename == meta_name:
-                          zout.writestr(meta_name, new_meta)
-                      elif info.filename == rec_name:
-                          zout.writestr(rec_name, new_rec)
-                      else:
-                          zout.writestr(info, data)
-              tmp_whl.replace(whl)
-          EOF
 
       - name: Upload Python wheels
         uses: actions/upload-artifact@v7
         with:
           name: python-wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
+          retention-days: 1
           if-no-files-found: error
 
       - name: Cancel workflow on failure
@@ -459,8 +440,9 @@ jobs:
 
   publish:
     name: Publish Packages
-    needs: [ resolve-version, test, build-java, build-csharp, build-python ]
+    needs: [ resolve-version, build-java, build-csharp, build-python ]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     environment: publish
     permissions:
       contents: read
@@ -488,6 +470,8 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
 
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -495,16 +479,10 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Cache boltffi_cli
-        id: cache-boltffi
-        uses: actions/cache@v6
+      - name: Setup boltffi_cli
+        uses: ./.github/actions/setup-boltffi
         with:
-          path: ~/.cargo/bin/boltffi*
-          key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.BOLTFFI_CLI_VERSION }}
-
-      - name: Install boltffi_cli
-        if: steps.cache-boltffi.outputs.cache-hit != 'true'
-        run: cargo install boltffi_cli --version "${{ env.BOLTFFI_CLI_VERSION }}" --locked
+          version: ${{ env.BOLTFFI_CLI_VERSION }}
 
       - name: Download all 6 native cdylib artifacts
         uses: actions/download-artifact@v8
@@ -594,37 +572,152 @@ jobs:
             cp "$src"/* "java-pkg/src/main/resources/native/${target}/"
           done
 
-      - name: Generate pom.xml for Java 8 fat JAR (lowercase coordinates)
+      - name: Generate pom.xml for Java 8 fat JAR (with sources and javadoc)
+        env:
+          PKG_VERSION: ${{ needs.resolve-version.outputs.version }}
         run: |
-          set -euo pipefail
-          GROUP_ID="$(echo "${{ env.JAVA_GROUP_ID }}" | tr '[:upper:]' '[:lower:]')"
-          ARTIFACT_ID="$(echo "${{ env.JAVA_ARTIFACT_ID }}" | tr '[:upper:]_' '[:lower:]-')"
-          REPO_LOWER="$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          python3 - <<'EOF'
+          import os, pathlib, re, tomllib
+          from xml.sax.saxutils import escape
 
-          cat <<EOF > java-pkg/pom.xml
-          <project xmlns="http://maven.apache.org/POM/4.0.0"
+          cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+          pkg = cargo.get("package", {})
+          ws_pkg = cargo.get("workspace", {}).get("package", {})
+
+          def get_meta(key, default=None):
+              val = pkg.get(key)
+              if isinstance(val, dict) and val.get("workspace") is True:
+                  val = ws_pkg.get(key, default)
+              return default if val is None else val
+
+          group_id = os.environ["JAVA_GROUP_ID"].lower()
+          artifact_id = os.environ["JAVA_ARTIFACT_ID"].lower().replace("_", "-")
+          version = os.environ["PKG_VERSION"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          repo_lower = repo.lower()
+
+          name = str(get_meta("name", artifact_id)).strip() or artifact_id
+          description = " ".join(str(get_meta("description", f"{name} Java JNI bindings")).split())
+          repo_url = str(get_meta("repository", "")).strip() or f"https://github.com/{repo}"
+          homepage = str(get_meta("homepage", "")).strip() or repo_url
+          license_str = str(get_meta("license", "")).strip()
+          authors_val = get_meta("authors", [])
+
+          licenses_xml = ""
+          if license_str:
+              licenses_xml = f"""
+            <licenses>
+              <license>
+                <name>{escape(license_str)}</name>
+              </license>
+            </licenses>"""
+
+          developers_xml = ""
+          if isinstance(authors_val, list):
+              dev_entries = []
+              for raw in authors_val:
+                  raw = str(raw).strip()
+                  if not raw:
+                      continue
+                  m = re.match(r"^(.*?)\s*<([^>]+)>$", raw)
+                  if m:
+                      dev_name = m.group(1).strip()
+                      dev_email = m.group(2).strip()
+                      parts = []
+                      if dev_name:
+                          parts.append(f"      <name>{escape(dev_name)}</name>")
+                      if dev_email:
+                          parts.append(f"      <email>{escape(dev_email)}</email>")
+                      if parts:
+                          dev_entries.append("    <developer>\n" + "\n".join(parts) + "\n    </developer>")
+                  else:
+                      dev_entries.append(f"    <developer>\n      <name>{escape(raw)}</name>\n    </developer>")
+              if dev_entries:
+                  developers_xml = "\n  <developers>\n" + "\n".join(dev_entries) + "\n  </developers>"
+
+          scm_host_path = repo_url.removeprefix("https://").removeprefix("http://").rstrip("/")
+          pom = f"""<project xmlns="http://maven.apache.org/POM/4.0.0"
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
             <modelVersion>4.0.0</modelVersion>
-            <groupId>${GROUP_ID}</groupId>
-            <artifactId>${ARTIFACT_ID}</artifactId>
-            <version>${{ needs.resolve-version.outputs.version }}</version>
+
+            <groupId>{escape(group_id)}</groupId>
+            <artifactId>{escape(artifact_id)}</artifactId>
+            <version>{escape(version)}</version>
             <packaging>jar</packaging>
+
+            <name>{escape(name)}</name>
+            <description>{escape(description)}</description>
+            <url>{escape(homepage)}</url>{licenses_xml}{developers_xml}
+
+            <scm>
+              <connection>scm:git:https://{escape(scm_host_path)}.git</connection>
+              <developerConnection>scm:git:ssh://git@{escape(scm_host_path)}.git</developerConnection>
+              <url>{escape(repo_url)}</url>
+            </scm>
+
+            <issueManagement>
+              <system>GitHub Issues</system>
+              <url>{escape(repo_url.rstrip('/'))}/issues</url>
+            </issueManagement>
 
             <properties>
               <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+              <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
               <maven.compiler.source>1.8</maven.compiler.source>
               <maven.compiler.target>1.8</maven.compiler.target>
             </properties>
+
+            <build>
+              <plugins>
+                <plugin>
+                  <groupId>org.apache.maven.plugins</groupId>
+                  <artifactId>maven-compiler-plugin</artifactId>
+                  <version>3.14.1</version>
+                </plugin>
+                <plugin>
+                  <groupId>org.apache.maven.plugins</groupId>
+                  <artifactId>maven-source-plugin</artifactId>
+                  <version>3.4.0</version>
+                  <executions>
+                    <execution>
+                      <id>attach-sources</id>
+                      <goals>
+                        <goal>jar-no-fork</goal>
+                      </goals>
+                    </execution>
+                  </executions>
+                </plugin>
+                <plugin>
+                  <groupId>org.apache.maven.plugins</groupId>
+                  <artifactId>maven-javadoc-plugin</artifactId>
+                  <version>3.12.0</version>
+                  <configuration>
+                    <doclint>none</doclint>
+                  </configuration>
+                  <executions>
+                    <execution>
+                      <id>attach-javadocs</id>
+                      <goals>
+                        <goal>jar</goal>
+                      </goals>
+                    </execution>
+                  </executions>
+                </plugin>
+              </plugins>
+            </build>
 
             <distributionManagement>
               <repository>
                 <id>github</id>
                 <name>GitHub Packages</name>
-                <url>https://maven.pkg.github.com/${REPO_LOWER}</url>
+                <url>https://maven.pkg.github.com/{escape(repo_lower)}</url>
               </repository>
             </distributionManagement>
           </project>
+          """
+
+          pathlib.Path("java-pkg/pom.xml").write_text(pom, encoding="utf-8")
           EOF
 
       - name: Build and publish Maven JAR to GitHub Packages

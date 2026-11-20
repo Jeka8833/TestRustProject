@@ -1,0 +1,22 @@
+name: Setup BoltFFI CLI
+description: Restore cache and install pinned boltffi_cli
+
+inputs:
+  version:
+    description: Exact version of boltffi_cli to install
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cache boltffi_cli
+      id: cache-boltffi
+      uses: actions/cache@v6
+      with:
+        path: ~/.cargo/bin/boltffi*
+        key: boltffi-cli-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}
+
+    - name: Install boltffi_cli
+      if: steps.cache-boltffi.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo install boltffi_cli --version "${{ inputs.version }}" --locked
