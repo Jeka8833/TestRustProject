@@ -82,6 +82,8 @@ jobs:
             os: ubuntu-24.04-arm
           - java_target: windows-x86_64
             os: windows-2025
+          - java_target: windows-aarch64
+            os: windows-11-arm
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -92,7 +94,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: zulu
-          java-version: '8'
+          java-version: '17'
 
       - name: Install clang (Linux)
         if: runner.os == 'Linux'
@@ -508,7 +510,7 @@ jobs:
           name: java-sources
           path: java-sources-staging
 
-      - name: Download all 5 native JNI libraries
+      - name: Download all 6 native JNI libraries
         uses: actions/download-artifact@v8
         with:
           pattern: java-native-*
@@ -519,7 +521,7 @@ jobs:
           set -euo pipefail
           mkdir -p java-pkg/src/main/java java-pkg/src/main/resources/native
           tar -xf java-sources-staging/java-sources.tar -C java-pkg/src/main/java
-          for target in darwin-arm64 darwin-x86_64 linux-x86_64 linux-aarch64 windows-x86_64; do
+          for target in darwin-arm64 darwin-x86_64 linux-x86_64 linux-aarch64 windows-x86_64 windows-aarch64; do
             src="java-native-staging/java-native-${target}"
             [ -d "$src" ] && [ -n "$(ls -A "$src")" ] || { echo "::error::Missing native library for ${target}"; exit 1; }
             mkdir -p "java-pkg/src/main/resources/native/${target}"
