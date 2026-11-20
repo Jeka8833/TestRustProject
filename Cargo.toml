@@ -1,6 +1,6 @@
 [package]
 name = "BlendshapeRouterV2"
-version = "1.0.6"
+version = "1.0.7"
 edition = "2024"
 
 description = "Краткое описание библиотеки (1–2 предложения)"
