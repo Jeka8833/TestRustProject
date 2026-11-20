@@ -599,8 +599,8 @@ jobs:
 
       - uses: actions/setup-java@v6
         with:
-          distribution: zulu
-          java-version: '8'
+          distribution: temurin
+          java-version: '17'
           server-id: github
           server-username: GITHUB_ACTOR
           server-password: GITHUB_TOKEN
@@ -729,16 +729,25 @@ jobs:
             <properties>
               <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
               <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-              <maven.compiler.source>1.8</maven.compiler.source>
-              <maven.compiler.target>1.8</maven.compiler.target>
+              <maven.compiler.release>8</maven.compiler.release>
             </properties>
 
             <build>
               <plugins>
                 <plugin>
                   <groupId>org.apache.maven.plugins</groupId>
+                  <artifactId>maven-resources-plugin</artifactId>
+                  <version>3.3.1</version>
+                </plugin>
+                <plugin>
+                  <groupId>org.apache.maven.plugins</groupId>
                   <artifactId>maven-compiler-plugin</artifactId>
                   <version>3.14.1</version>
+                </plugin>
+                <plugin>
+                  <groupId>org.apache.maven.plugins</groupId>
+                  <artifactId>maven-jar-plugin</artifactId>
+                  <version>3.4.2</version>
                 </plugin>
                 <plugin>
                   <groupId>org.apache.maven.plugins</groupId>
@@ -769,6 +778,11 @@ jobs:
                     </execution>
                   </executions>
                 </plugin>
+                <plugin>
+                  <groupId>org.apache.maven.plugins</groupId>
+                  <artifactId>maven-deploy-plugin</artifactId>
+                  <version>3.1.4</version>
+                </plugin>
               </plugins>
             </build>
 
@@ -789,4 +803,11 @@ jobs:
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: mvn -B -f java-pkg/pom.xml deploy
+        run: |
+          mvn -B -e -f java-pkg/pom.xml deploy \
+            -Djava.net.preferIPv4Stack=true \
+            -Dmaven.repository.credentialScope=id \
+            -Daether.connector.connectTimeout=30000 \
+            -Daether.connector.requestTimeout=120000 \
+            -Daether.transport.http.connectTimeout=30000 \
+            -Daether.transport.http.requestTimeout=120000
