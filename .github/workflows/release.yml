@@ -18,7 +18,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  BOLTFFI_CLI_VERSION: "0.32.1"
   JAVA_GROUP_ID: "com.${{ github.repository_owner }}"
   JAVA_ARTIFACT_ID: "${{ github.event.repository.name }}"
 
@@ -129,8 +128,6 @@ jobs:
 
       - name: Setup boltffi_cli
         uses: ./.github/actions/setup-boltffi
-        with:
-          version: ${{ env.BOLTFFI_CLI_VERSION }}
 
       - name: Pack Java JNI for ${{ matrix.java_target }}
         shell: bash
@@ -283,8 +280,6 @@ jobs:
 
       - name: Setup boltffi_cli
         uses: ./.github/actions/setup-boltffi
-        with:
-          version: ${{ env.BOLTFFI_CLI_VERSION }}
 
       - name: Set macOS deployment target
         if: runner.os == 'macOS'
@@ -326,6 +321,7 @@ jobs:
                   val = ws_pkg.get(key, default)
               return default if val is None else val
 
+          version = str(get_meta("version", "")).strip()
           summary = " ".join(str(get_meta("description", "")).split())
           license_str = str(get_meta("license", "")).strip()
           authors_val = get_meta("authors", [])
@@ -352,6 +348,21 @@ jobs:
           pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
           project = pyproject.setdefault("project", {})
           dynamic = set(project.get("dynamic", []))
+
+          if "name" not in project and "name" not in dynamic:
+              setup_py = pathlib.Path("dist/python/setup.py")
+              if setup_py.is_file():
+                  m = re.search(r"""name\s*=\s*['"]([^'"]+)['"]""", setup_py.read_text(encoding="utf-8"))
+                  if m:
+                      project["name"] = m.group(1)
+              if "name" not in project:
+                  pkg_name = str(get_meta("name", "")).strip()
+                  if pkg_name:
+                      project["name"] = pkg_name
+
+          if version:
+              project["version"] = version
+              dynamic.discard("version")
 
           if summary:
               project["description"] = summary
@@ -481,8 +492,6 @@ jobs:
 
       - name: Setup boltffi_cli
         uses: ./.github/actions/setup-boltffi
-        with:
-          version: ${{ env.BOLTFFI_CLI_VERSION }}
 
       - name: Download all 6 native cdylib artifacts
         uses: actions/download-artifact@v8
