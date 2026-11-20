@@ -1,12 +1,12 @@
 [package]
 name = "BlendshapeRouterV2"
-version = "1.0.10"
+version = "1.0.11"
 edition = "2024"
 
 description = "Краткое описание библиотеки (1–2 предложения)"
 readme = "README.md"
 license = "MIT"
-authors = ["Jeka8833 <your@email.com>"]
+authors = ["Jeka8833"]
 repository = "https://github.com/Jeka8833/TestRustProject"
 homepage = "https://github.com/Jeka8833/TestRustProject"
 

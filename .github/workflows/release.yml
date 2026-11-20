@@ -8,11 +8,6 @@ on:
         required: false
         type: boolean
         default: false
-      dry_run:
-        description: 'Run all builds and tests without publishing packages'
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}
@@ -464,7 +459,6 @@ jobs:
 
   publish:
     name: Publish Packages
-    if: ${{ !inputs.dry_run }}
     needs: [ resolve-version, test, build-java, build-csharp, build-python ]
     runs-on: ubuntu-24.04
     environment: publish
